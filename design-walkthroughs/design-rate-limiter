@@ -1,0 +1,95 @@
+https://www.hellointerview.com/learn/system-design/problem-breakdowns/distributed-rate-limiter
+
+# Designing a Distributed Rate Limiter
+
+## Understanding the Problem
+
+A rate limiter controls how many requests a client can make within a specific timeframe. It acts like a traffic controller for your API - allowing, for example, 100 requests per minute from a user, then rejecting excess requests with an HTTP 429 "Too Many Requests" response. Rate limiters prevent abuse, protect your servers from being overwhelmed by bursts of traffic, and ensure fair usage across all users.
+
+## Requirements
+![Distributed Rate Limiter requirements diagram](../resources/img/rate-limiter-req.png)
+
+### Functional Requirements
+
+- The system should identify clients by user ID, IP address, or API key to apply appropriate limits.
+- The system should limit HTTP requests based on configurable rules (e.g., 100 API requests per minute per user).
+- When limits are exceeded, the system should reject requests with HTTP 429 and include helpful headers (rate limit remaining, reset time).
+
+##### Out of scope
+- Complex querying or analytics on rate limit data
+- Long-term persistence of rate limiting data
+
+### Non-Functional Requirements
+
+- The system should introduce minimal latency overhead (< 10ms per request check).
+- The system should be highly available. Eventual consistency is ok as slight delays in limit enforcement across nodes are acceptable.
+- The system should handle 1M requests/second across 100M daily active users.
+
+## Core Entities
+While rate limiters might seem like simple infrastructure components, they actually involve several important entities that we need to model properly:
+
+**Rules**: The rate limiting policies that define limits for different scenarios. Each rule specifies parameters like requests per time window, which clients it applies to, and what endpoints it covers. For example: "authenticated users get 1000 requests/hour" or "the search API allows 10 requests/minute per IP."
+
+**Clients**: The entities being rate limited - this could be users (identified by user ID), IP addresses, API keys, or combinations thereof. Each client has associated rate limiting state that tracks their current usage against applicable rules.
+
+**Requests**: The incoming API requests that need to be evaluated against rate limiting rules. Each request carries context like client identity, endpoint being accessed, and timestamp that determines which rules apply and how to track usage.
+
+These entities work together: when a Request arrives, we identify the Client, look up applicable Rules, check current usage against those rules, and decide whether to allow or deny the request. The interaction between these entities powers our rate limiter.
+
+## System Interface
+
+A rate limiter is an infrastructure component that other services call to check if a request should be allowed. The interface is straightforward:
+
+```
+isRequestAllowed(clientId, ruleId) -> { passes: boolean, remaining: number, resetTime: timestamp }
+```
+
+This method takes a client identifier (user ID, IP address, or API key) and a rule identifier, then returns whether the request should be allowed based on current usage. It also provides information for response headers like `X-RateLimit-Remaining` and `X-RateLimit-Reset`.
+
+## High-Level Design
+
+### 1) The system should identify clients by user ID, IP address, or API key to apply appropriate limits
+
+**Where should we place the rate limiter?**
+
+You have three main options here, each with different trade-offs:
+- Within MS - Won't work for distributed stystems
+- Dedicated MS - Latency will increase
+- API Gateway/Load Balancer - Best place
+
+**API Gateway/Load Balancer**
+
+**Approach**
+
+The rate limiter runs at the very edge of your system, integrated into your API gateway or load balancer. Every incoming request hits the rate limiter first, before it reaches any of your application servers. The rate limiter examines the request (checking IP address, user authentication headers, API keys), applies the appropriate limits, and either forwards the request downstream or immediately returns an HTTP 429 response.
+
+This is the most popular approach in production systems because it's conceptually simple and provides strong protection. Your application servers never see blocked requests, so they can focus entirely on processing legitimate traffic. For those who like analogies, the rate limiter acts like a bouncer at a club. Troublemakers get turned away at the door, not after they're already inside causing problems like was the case with our "Good" approach.
+
+**Challenges**
+
+The main limitation is context. The rate limiter only has access to information available in the HTTP request itself - headers, URL, IP address, and basic authentication tokens. It can't see deeper business logic or user context that might live in your application layer. For example, you can't easily implement rules like "premium users get 10x higher limits" unless that premium status is encoded in a JWT token or similar.
+
+There's also the question of where to store the rate limiting state. The gateway needs fast access to counters and timestamps, which usually means an in-memory store like Redis. But now you have external dependencies and need to handle cases where Redis is slow or unavailable.
+
+We'll talk all about how to do this effectively in our deep dives!
+
+**How do we identify clients?**
+
+Since we chose the API Gateway approach, our rate limiter only has access to information in the HTTP request itself. This includes the request URL/path, all HTTP headers (Authorization, User-Agent, X-API-Key, etc.), query parameters, and the client's IP address. While we can technically make external calls to databases or other services, it adds latency we want to avoid so we'll stick to the request itself.
+
+We first need to decide what makes a "client" unique. The key we use determines how limits get applied. We have three main options:
+
+**User ID:** Perfect for authenticated APIs. Each logged-in user gets their own rate limit allocation. This is typically present in the Authorization header as a JWT token.
+
+**IP Address:** Good for public APIs or when you don't have user accounts. But watch out for users behind NATs or corporate firewalls. The IP address is typically present in the X-Forwarded-For header.
+
+**API Key:** Common for developer APIs. Each key holder gets their own limits. Most typically, this is denoted in the X-API-Key header.
+
+In practice, you'll probably want a combination. Maybe authenticated users get higher limits than anonymous IPs, and premium users may get even more. This is reflective of real systems that don't just enforce a global limit, but layer multiple rules. For example:
+
+- Per-user limits: "Alice can make 1000 requests/hour"
+- Per-IP limits: "This IP can make 100 requests/minute"
+- Global limits: "Our API can handle 50,000 requests/second total"
+- Endpoint-specific limits: "The search API is limited to 10 requests/minute, but profile updates are 100/minute"
+
+Your rate limiter needs to check all applicable rules and enforce the most restrictive one. If Alice has used 50 of her 1000 requests but her IP has hit the 100 request limit, she gets blocked.
