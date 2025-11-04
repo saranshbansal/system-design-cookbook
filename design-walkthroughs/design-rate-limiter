@@ -93,3 +93,7 @@ In practice, you'll probably want a combination. Maybe authenticated users get h
 - Endpoint-specific limits: "The search API is limited to 10 requests/minute, but profile updates are 100/minute"
 
 Your rate limiter needs to check all applicable rules and enforce the most restrictive one. If Alice has used 50 of her 1000 requests but her IP has hit the 100 request limit, she gets blocked.
+
+## Final Design
+
+![alt text](../resources/img/rate-limiter-design.png)
