@@ -87,12 +87,131 @@ We first need to decide what makes a "client" unique. The key we use determines 
 
 In practice, you'll probably want a combination. Maybe authenticated users get higher limits than anonymous IPs, and premium users may get even more. This is reflective of real systems that don't just enforce a global limit, but layer multiple rules. For example:
 
-- Per-user limits: "Alice can make 1000 requests/hour"
-- Per-IP limits: "This IP can make 100 requests/minute"
-- Global limits: "Our API can handle 50,000 requests/second total"
-- Endpoint-specific limits: "The search API is limited to 10 requests/minute, but profile updates are 100/minute"
+- **Per-user limits:** "Alice can make 1000 requests/hour"
+- **Per-IP limits:** "This IP can make 100 requests/minute"
+- **Global limits:** "Our API can handle 50,000 requests/second total"
+- **Endpoint-specific limits:** "The search API is limited to 10 requests/minute, but profile updates are 100/minute"
 
 Your rate limiter needs to check all applicable rules and enforce the most restrictive one. If Alice has used 50 of her 1000 requests but her IP has hit the 100 request limit, she gets blocked.
+
+### 2) The system should limit requests based on configurable rules
+
+There are four main algorithms used in production systems, each with different trade-offs around accuracy, memory usage, and complexity. We'll examine each one to understand when you'd choose it.
+
+#### Fixed Window Counter
+
+The simplest approach divides time into fixed windows (like 1-minute buckets) and counts requests in each window. For each user, we'd maintain a counter that resets to zero at the start of each new window. If the counter exceeds the limit during a window, reject new requests until the window resets.
+
+For example, with a 100 requests/minute limit, you might have windows from 12:00:00-12:00:59, 12:01:00-12:01:59, etc. A user can make 100 requests during each window, then must wait for the next window to start.
+
+![alt text](../resources/img/rate-limit-strategy-1.png)
+
+This is really simple to implement. It's just a hash table mapping client IDs to (counter, window_start_time) pairs. The main challenges are boundary effects: a user could make 100 requests at 12:00:59, then immediately make another 100 requests at 12:01:00, effectively getting 200 requests in 2 seconds. There's also potential for "starvation" if a user hits their limit early in a window.
+```
+{
+  "alice:12:00:00": 100,
+  "alice:12:01:00": 5,
+  "bob:12:00:00": 20,
+  "charlie:12:00:00": 0,
+  "dave:12:00:00": 54,
+  "eve:12:00:00": 0,
+  "frank:12:00:00": 12,
+}
+```
+
+#### Sliding Window Log
+
+This algorithm keeps a log of individual request timestamps for each user. When a new request arrives, you remove all timestamps older than your window (e.g., older than 1 minute ago), then check if the remaining count exceeds your limit.
+
+This gives you perfect accuracy. You're always looking at exactly the last N minutes of requests, regardless of when the current request arrives. No boundary effects, no unfair bursts allowed.
+
+![alt text](../resources/img/rate-limit-strategy-2.png)
+
+The downside is memory usage. For a user making 1000 requests per minute, you need to store 1000 timestamps. Scale this to millions of users and you quickly run into memory problems. There's also computational overhead scanning through timestamp logs for each request.
+
+#### Sliding Window Counter
+
+This is a clever hybrid that approximates sliding windows using fixed windows with some math. You maintain counters for the current window and the previous window. When a request arrives, you estimate how many requests the user "should have" made in a true sliding window by weighing the previous and current windows based on how far you are into the current window.
+
+For example, if you're 30% through the current minute, you count 70% of the previous minute's requests plus 100% of the current minute's requests.
+
+This gives you much better accuracy than fixed windows while using minimal memory. It's just two counters per client. The trade-off is that it's an approximation that assumes traffic is evenly distributed within windows, and the math can be tricky to implement correctly.
+
+#### Token Bucket
+
+Think of each client having a bucket that can hold a certain number of tokens (the burst capacity). Tokens are added to the bucket at a steady rate (the refill rate). Each request consumes one token. If there are no tokens available, the request is rejected.
+
+For example, a bucket might hold 100 tokens (allowing bursts up to 100 requests) and refill at 10 tokens per minute (steady rate of 10 requests/minute). A client can make 100 requests immediately, then must wait for tokens to refill.
+
+This handles both sustained load (the refill rate) and temporary bursts (the bucket capacity). It's also simple to implement, you just track (tokens, last_refill_time) per client. The challenge is choosing the right bucket size and refill rate, and handling "cold start" scenarios where idle clients start with full buckets.
+
+![alt text](../resources/img/rate-limit-strategy-4.png)
+
+For our system, we'll go with the Token Bucket algorithm. It strikes the best balance between simplicity, memory efficiency, and handling real-world traffic patterns. Companies like Stripe use this approach because it naturally accommodates the bursty nature of API traffic while still enforcing overall rate limits.
+
+Now we have a new problem. We know how the Token Bucket algorithm works conceptually, but where and how do we actually store each user's bucket? Each bucket needs to track two pieces of data: the current token count and the last refill timestamp. This state needs to be shared across all our API gateway instances.
+
+We can use something like Redis. Redis is a fast, in-memory data store that all our gateway instances can access. Redis can become our central source of truth for all token bucket state. When any gateway needs to check or update a user's rate limit, it talks to Redis.
+
+Here's exactly how the Token Bucket algorithm works with Redis:
+
+1. A request arrives at Gateway A for user Alice with a user ID of alice.
+2. The gateway calls Redis to fetch Alice's current bucket state using HMGET alice:bucket tokens last_refill. The HMGET command retrieves the values of multiple keys from a Redis hash. In this case, we're getting the current tokens count and the last_refill timestamp for Alice's bucket.
+3. The gateway calculates how many tokens to add to Alice's bucket based on the time elapsed since her last refill. If Alice's bucket was last updated 30 seconds ago and her refill rate is 1 token per second, the gateway adds 30 tokens to her current count, up to the bucket's maximum capacity.
+4. The gateway then updates Alice's bucket state atomically using a Redis transaction to prevent race conditions:
+    ```
+    MULTI
+    HSET alice:bucket tokens <new_token_count>
+    HSET alice:bucket last_refill <current_timestamp>
+    EXPIRE alice:bucket 3600
+    EXEC
+    ```
+    The MULTI/EXEC block ensures all commands execute as a single atomic operation. The HSET commands update the hash fields with the new token count and timestamp, while EXPIRE automatically deletes the bucket after 1 hour of inactivity to prevent memory leaks.
+ 
+ 5. Finally, the gateway makes the final decision based on Alice's updated token count. If she has at least 1 token available, the gateway allows the request and decrements her token count by 1. If she has no tokens remaining, the gateway rejects the request.
+
+### 3) When limits are exceeded, reject requests with HTTP 429 and helpful headers
+
+Now we need to decide what happens when a user hits their rate limit. This might seem straightforward (just return an error) but there are important design decisions that affect both user experience and system performance.
+
+**Should we drop requests or queue them?**
+
+The first decision is whether to immediately reject excess requests or queue them for later processing. Most rate limiters take the "fail fast" approach, they immediately return an HTTP 429 status code when limits are exceeded. This is what we'll implement.
+
+The alternative would be queuing excess requests and processing them when the user's rate limit resets. While this sounds user-friendly, it creates more problems than it solves. Queued requests consume memory and processing resources. Users might think their requests failed and retry, creating even more load. Worst of all, queue processing delays make your API response times unpredictable.
+
+There are niche cases where queuing makes sense, like batch processing systems that can afford to wait, but for interactive APIs, fast failure is almost always the right choice.
+
+**How can we make the response helpful?**
+
+429 is the standard HTTP status code for "Too Many Requests". It exists in the HTTP spec for exactly this purpose.
+
+When rejecting a request, we return HTTP 429 "Too Many Requests" along with headers that help clients understand what happened and how to recover. The key headers are:
+
+- `X-RateLimit-Limit`: The rate limit ceiling for that request (e.g., "100")
+- `X-RateLimit-Remaining`: Number of requests left in the current window (e.g., "0")
+- `X-RateLimit-Reset`: When the rate limit resets, as a Unix timestamp (e.g., "1640995200")
+
+Some systems also include Retry-After, which tells the client how many seconds to wait before trying again.
+
+Here's what a complete 429 response might look like:
+```
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1640995200
+Retry-After: 60
+Content-Type: application/json
+
+{
+  "error": "Rate limit exceeded",
+  "message": "You have exceeded the rate limit of 100 requests per minute. Try again in 60 seconds."
+}
+```
+
+These headers allow well-behaved clients to implement proper backoff strategies. A client can see exactly when to retry rather than hammering your API with failed requests.
+
+As far as the interview goes, you'll typically just want to callout that you know you'll respond with a 429 and the appropriate headers.
 
 ## Final Design
 
