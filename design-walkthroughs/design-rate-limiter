@@ -213,6 +213,133 @@ These headers allow well-behaved clients to implement proper backoff strategies.
 
 As far as the interview goes, you'll typically just want to callout that you know you'll respond with a 429 and the appropriate headers.
 
+## Deep Dives
+### 1) How do we scale to handle 1M requests/second?
+Our current design has multiple API gateways talking to a single Redis instance. This works fine for smaller loads, but the math breaks down at our target scale of 1M requests/second. A typical Redis instance can handle around 100,000-200,000 operations per second depending on the operation complexity. Each one of our rate limit checks requires multiple Redis operations, at minimum an HMGET to fetch state and an HSET to update it. So our single Redis instance can realistically handle maybe 50,000-100,000 rate limit checks per second before becoming the bottleneck.
+
+At 1M requests/second, we need to distribute the Redis load across multiple instances. But this isn't quite as simple as just spinning up more Redis servers because we need a way to partition the rate limiting data so each request knows which Redis instance to talk to.
+
+The sharding strategy depends on our rate limiting rules. Remember we identified multiple client types earlier - user IDs for authenticated users, IP addresses for anonymous users, and API keys for developer access. We need to shard consistently so that all of a client's requests always hit the same Redis instance. If user "alice" sometimes hits Redis shard 1 and sometimes hits shard 2, her rate limiting state gets split and becomes useless.
+
+We need a distribution algorithm like consistent hashing to solve this. For authenticated users, we hash their user ID to determine which Redis shard stores their rate limit data. For anonymous users, we hash their IP address. For API key requests, we hash the API key. This ensures each client's rate limiting state lives on exactly one shard, while distributing the load evenly across all shards.
+
+Each API gateway needs routing logic to determine which Redis shard to query. When a request arrives, the gateway extracts the appropriate identifier (user ID, IP, or API key), applies the distribution algorithm, and routes the rate limit check to the correct Redis instance. The Token Bucket algorithm remains exactly the same, we're just talking to different Redis instances instead of one.
+
+With 10 Redis shards, each handling ~100k operations/second, we should be able to handle our 1M request/second target.
+
+### 2) How do we ensure high availability and fault tolerance?
+
+When scaling to multiple Redis shards, each shard becomes a single point of failure for the users whose rate-limiting data resides on it. If a shard goes down, those users lose rate-limiting control, potentially causing aggressive retries and cascading failures across the system.
+
+1. Failure Mode Decision
+
+**Fail-closed (preferred):** Requests are rejected when Redis is unavailable. Although it temporarily reduces availability, it prevents system overload during high-traffic spikes (e.g., viral events). This protects critical backend services like databases and message queues from collapse.
+
+**Fail-open:** Requests continue without rate limiting if Redis fails. This maximizes availability but risks uncontrolled request floods that can overwhelm downstream systems. It’s suitable only for non-critical workloads where data consistency and system stability are less important.
+
+2. High Availability Design
+
+**Master-replica replication:** Each Redis shard has one or more replicas that continuously synchronize with the master. If the master fails, a replica is automatically promoted, minimizing downtime.
+
+**Redis Cluster:** Provides built-in failover management, automatically detecting failures and electing a new master without manual intervention. This offers strong resilience but increases infrastructure costs and requires careful handling of replication lag.
+
+**Replication performance:** Redis replication is asynchronous but typically very fast, ensuring minimal data loss during failover.
+
+3. Monitoring and Alerting
+
+**Redis-level monitoring:** Track key metrics such as CPU usage, memory consumption, replication lag, and network health across all shards.
+
+**Application-level monitoring:** Measure rate-limit success rates, response latency, and alert conditions for fail-open events.
+
+**Alerting strategy:** Implement proactive alerts and automated recovery workflows to quickly detect, isolate, and mitigate failures before users experience degradation.
+
+Bottom line:
+Choose a fail-closed mode for stability under load, strengthen Redis reliability through replication and clustering, and maintain comprehensive monitoring to ensure consistent high availability.
+
+### 3) How do we minimize latency overhead?
+
+Every rate-limit check adds a network round trip to Redis. While Redis itself is fast (sub-millisecond), network latency — especially at scale (e.g., 1M requests/sec) — can accumulate significantly. The goal is to reduce this overhead through strategic optimizations.
+
+1. Connection Pooling (Primary Optimization)
+
+**Why it matters:** Creating a new TCP connection for each request adds 20–50 ms of handshake overhead — far more than Redis’s own processing time.
+
+**Solution:** Maintain a pool of persistent connections between API gateways and Redis. This allows requests to reuse established connections, avoiding repeated setup costs.
+
+**Implementation detail:** Most Redis clients support pooling natively, but you must tune the pool size based on request throughput, concurrency, and Redis response times to prevent exhaustion or idle overhead.
+
+2. Geographic Distribution (Largest Latency Gain)
+
+**Approach:** Deploy Redis clusters and API gateways across multiple regions, colocated with users. A user in Tokyo should connect to a Redis instance in Asia rather than one in Virginia.
+
+**Benefit:** Reduces network distance and round-trip time dramatically.
+
+**Trade-off:** Increases operational complexity — maintaining data consistency across regions is harder. However, for rate limiting, eventual consistency is usually acceptable since brief delays in global synchronization don’t harm system integrity.
+
+3. Secondary Optimizations (Conditional Use)
+
+**Local caching:** Can minimize reads but risks stale data, potentially leading to inaccurate rate-limit enforcement.
+
+R**edis pipelining or Lua scripting:** Batches multiple operations in one network call to cut round trips — useful in high-volume scenarios.
+
+**Request batching:** Combines multiple same-user requests into a single Redis operation, reducing overall load.
+
+> Caution: These add complexity and are rarely necessary if pooling and regional deployments are optimized properly. Use them only if latency remains a bottleneck.
+
+Bottom line:
+Prioritize connection pooling and regional Redis deployments — they deliver the biggest latency reductions with manageable complexity. Use caching, pipelining, or batching only for specialized performance tuning.
+
+### 4) How do we handle hot keys (viral content scenarios)?
+
+Hot keys occur when a single key (like a user ID or IP) receives an extremely high volume of requests, creating uneven load on Redis shards. In rate limiting systems, this can happen due to both abusive traffic (e.g., bots, DDoS) and legitimate high-volume clients (e.g., analytics tools or popular apps).
+
+1. Understanding the Problem
+
+A hot key overwhelms a Redis shard with tens of thousands of requests per second from one source.
+
+Although rate limiters are write-heavy (counter updates), hot key scenarios primarily create excessive read pressure when multiple concurrent requests query the same counter.
+
+The result is uneven shard utilization and potential request throttling or failure.
+
+2. Strategies for Legitimate High-Volume Clients
+
+**Client-side rate limiting:** Encourage clients to apply local throttling logic using API SDKs or response header hints. This smooths out request spikes before they hit the server.
+
+**Request batching/queuing:** Allow clients to bundle multiple operations into one request, reducing per-request rate limit checks.
+
+P**remium or high-limit tiers:** Provide dedicated infrastructure or higher rate limits for enterprise users who legitimately generate high request volumes. This prevents them from degrading service for others.
+
+3. Strategies for Abusive or Malicious Traffic
+
+**Automatic blocking:** Identify clients that hit rate limits excessively (e.g., >10 times/minute) and temporarily block them via IP/API key. Store blocklists in Redis and check them on cache misses to minimize overhead.
+
+**DDoS protection:** Leverage network-layer defenses such as Cloudflare, AWS Shield, or similar WAFs to filter malicious traffic before it reaches your rate limiter.
+
+4. Design Considerations
+
+**Client cooperation:** Encourage “good API citizenship” — while you can’t rely on clients for security, cooperative rate limiting reduces infrastructure strain.
+
+**Shared IP environments:** Anticipate legitimate users sharing IPs (e.g., corporate NATs, cafés, public WiFi). Use user-based limits instead of pure IP-based rate limiting and set higher IP thresholds to avoid penalizing shared users.
+
+Bottom line:
+Handle hot keys through a mix of client-side discipline, server-side protections, and smart rate limit design. Promote client throttling and batching for legitimate traffic, enforce automated blocking and DDoS mitigation for abuse, and tune limits to handle shared IP scenarios gracefully.
+
+
+### 5) How do we handle dynamic rule configuration?
+
+So far we've assumed rate limiting rules are static, user X gets Y requests per minute. But production systems need flexibility to adjust limits without deploying new code. You might need to temporarily increase limits during a product launch, give premium customers higher limits, or quickly reduce limits if you're seeing unusual traffic patterns.
+
+**Approach**
+
+Use a push-based system where configuration changes are immediately sent to all API gateways. This is exactly what ZooKeeper was designed for - distributed configuration management with real-time notifications. ZooKeeper maintains configuration data and notifies all connected clients (your API gateways) immediately when any configuration changes. Other options include Redis pub/sub or custom configuration services that maintain persistent connections to gateways.
+When an operator changes a rate limit rule, the configuration service immediately notifies all connected gateways, which update their rules within seconds.
+
+**Challenges**
+
+This approach adds a lot more complexity. You need to handle connection failures, ensure all gateways receive updates, and deal with partial failures where some gateways update successfully while others don't. You also need fallback mechanisms when the push system is unavailable.
+
+The operational complexity is usually only justified for systems that need very fast rule updates, like those dealing with security incidents or high-frequency trading scenarios.
+
 ## Final Design
 
 ![alt text](../resources/img/rate-limiter-design.png)
