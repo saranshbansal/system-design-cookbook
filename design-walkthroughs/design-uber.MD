@@ -6,37 +6,26 @@ Design a large-scale ride-hailing service (like Uber) that supports matching rid
 ### Requirements
 ![Uber system requirements diagram](../resources/img/uber-req.jpeg)
 
-- Functional
-	- Rider can request a ride (pickup, destination).
-	- Driver can accept/decline requests and update availability.
-	- Find nearby drivers and match them to rider requests quickly.
-	- Real-time location updates for driver and rider tracking.
-	- Fare calculation, trip lifecycle (requested → accepted → en-route → completed → paid).
+### Functional
+
+- Rider can request a ride (pickup, destination).
+- Driver can accept/decline requests and update availability.
+- Find nearby drivers and match them to rider requests quickly.
+- Real-time location updates for driver and rider tracking.
+- Fare calculation, trip lifecycle (requested → accepted → en-route → completed → paid).
   
-  **Out of scope**
-	- Surge pricing.
-	- Ride selection
-	- User and driver profiles, trip history, ratings.
+**Out of scope**
+- Surge pricing.
+- Ride selection
+- User and driver profiles, trip history, ratings.
 
-- Non-functional
-	- Low latency and **consistency** for matching (< 1s for initial shortlist).
-	- Scalable to millions of users and drivers across regions.
-	- Secure and consistent handling of sensitive data.
+### Non-functional
+- Low latency and **consistency** for matching (< 1s for initial shortlist).
+- Scalable to millions of users and drivers across regions.
+- Secure and consistent handling of sensitive data.
 
-### High-level Components
+## Core Entities
 
-- Client apps (iOS/Android) for riders and drivers.
-- API Gateway / Mobile backend.
-- **Matching Service** (dispatch).
-- **Location Service** (ingests location streams).
-- Geospatial Index (to query nearby drivers).
-- **Ride Service** (orchestrates state transitions).
-- **Pricing Service** (fares, surge).
-- **Notifications/Push Service**.
-- Data stores: user DB, driver DB, trip DB, geospatial store, metrics and logs.
-- Real-time stream platform (e.g., Kafka, SQS) for events and location updates.
-
-### Core Entities
 - **Rider**: This is any user who uses the platform to request rides. It includes personal information such as name and contact details, preferred payment methods for ride transactions, etc.
 - **Driver**: This is any users who are registered as drivers on the platform and provide transportation services. It has their personal details, vehicle information (make, model, year, etc.), and preferences, and availability status.
 - **Fare**: This entity represents an estimated fare for a ride. It includes the pickup and destination locations, the estimated fare, and the estimated time of arrival. This could also just be put on the ride object, but we'll keep it separate for now but there is no right or wrong answer here.
@@ -52,7 +41,7 @@ Indexes:
 - Geospatial index on driver locations
 - Secondary indexes for driver availability and region
 
-### API or System Interface
+## API or System Interface
 
 **Fair Estimate Endpoint**: The API for retrieving a fare estimate is straightforward. We define a simple POST endpoint that takes in the user's current location and desired destination and returns a Fare object with the estimated fare and eta. We use POST here because we will be creating a new ride object in the database.
 ```
@@ -93,7 +82,7 @@ Body: {
 
 The Ride object is would contain information about the pickup location and destination so the client can display this information to the driver.
 
-### Core Flows / HLD
+## High Level Design
 
 ![Uber system diagram](../resources/img/uber-design.png)
 
@@ -118,7 +107,7 @@ The Ride object is would contain information about the pickup location and desti
 4. Trip lifecycle
 	 - Driver picks up rider, trip state transitions; Location Service streams updates for ETA calculation and UI.
 
-### Deep Dives
+## Deep Dives
 
 #### Matching Strategies & Algorithms
 - Simple radius nearest-neighbor: Use geospatial index (Redis GEO or specialized quad-tree).
@@ -170,9 +159,9 @@ The Ride object is would contain information about the pickup location and desti
 - Precomputing match candidates reduces latency but might use stale data.
 - Strong consistency increases complexity and reduces throughput; eventual consistency is acceptable for metrics/analytics but not for trip assignment.
 
-### Interview Questions
+## Interview Questions
 
-#### 1. How do we handle frequent driver location updates and efficient proximity searches on location data?
+### 1. How do we handle frequent driver location updates and efficient proximity searches on location data?
 
 Managing the high volume of location updates from drivers and performing efficient proximity searches to match them with nearby ride requests is a difficult task, and our current high-level design most definitely does not handle this well. There are two main problems with our current design that we need to solve:
 
@@ -200,7 +189,7 @@ The main challenge with this approach would be durability. Since Redis is an in-
 
 Even if we experience data loss due to a system failure, the impact would be minimal. Since driver location updates come in every 5 seconds, we would only need that long to recover and rebuild the state of our system. This quick recovery time ensures that our system remains robust and reliable, even in the face of potential failures.
 
-#### 2. How can we manage system overload from frequent driver location updates while ensuring location accuracy?
+### 2. How can we manage system overload from frequent driver location updates while ensuring location accuracy?
 
 High-frequency location updates from drivers can lead to system overload, straining server resources and network bandwidth. This overload risks slowing down the system, leading to delayed location updates and potentially impacting user experience. In most candidates original design, they have drivers ping a new location every 5 seconds or so. This follow up question is designed to see if they can intelligently reduce the number of pings while maintaining accuracy.
 
@@ -216,7 +205,7 @@ The driver's app uses on-device sensors and algorithms to determine the optimal 
 
 The main challenge with this approach is the complexity of designing effective algorithms to determine the optimal update frequency. This requires careful consideration and testing to ensure accuracy and reliability. But, if done well, it will significantly reduce the number of location updates and improve system efficiency.
 
-#### 3. How do we prevent multiple ride requests from being sent to the same driver simultaneously?
+### 3. How do we prevent multiple ride requests from being sent to the same driver simultaneously?
 
 We defined consistency in ride matching as a key non-functional requirement. This means that we only request one driver at a time for a given ride request AND that each driver only receives one ride request at a time. That driver would then have 10 seconds to accept or deny the request before we move on to the next driver if necessary. If you've solved Ticketmaster before, you know this problem well -- as it's almost exactly the same as ensuring that a ticket is only sold once while being reserved for a specific amount of time at checkout.
 
@@ -230,7 +219,7 @@ To solve the timeout issue, we can use a distributed lock implemented with an in
 
 The main challenge with this approach is the system's reliance on the availability and performance of the in-memory data store for locking. This requires robust monitoring and failover strategies to ensure that the system can recover quickly from failures and that locks are not lost or corrupted. Given locks are only held for 10 seconds, this is a reasonable tradeoff as the ephemerality of the data makes it easier to recover from failures.
 
-#### 4. How can we ensure no ride requests are dropped during peak demand periods?
+### 4. How can we ensure no ride requests are dropped during peak demand periods?
 
 During peak demand periods, the system may receive a high volume of ride requests, which can lead to dropped requests. This is particularly problematic during special events or holidays when demand is high and the system is under stress. We also need to protect against the case where an instance of the Ride Matching Service crashes or is restarted, leading to dropped rides.
 
@@ -244,10 +233,11 @@ We could use a distributed message queue system like Kafka, which allows us to c
 **Challenges**
 
 The main challenge with this approach is the complexity of managing a queueing system. We need to ensure that the queue is scalable, fault-tolerant, and highly available. We can address this by using a managed queueing service like Amazon SQS or Kafka, which provides these capabilities out of the box. This allows us to focus on the business logic of the system without worrying about the underlying infrastructure.
+
 The other issue with this approach is that since it is a FIFO queue you could have requests that are stuck behind a request that is taking a long time to process. This is a common issue with FIFO queues and can be addressed by using a priority queue instead. This allows us to prioritize requests based on factors like driver proximity, driver rating, and other relevant factors. This ensures that the most important requests are processed first, leading to a better user experience.
 
 
-#### 5. What happens if a driver fails to respond in a timely manner?
+### 5. What happens if a driver fails to respond in a timely manner?
 Our system works great when the drivers either accept or deny the ride request, but what if the drop their phone in the passenger seat and take a break? How do we ensure that the ride request continues to be processed? Ideally we'd want the system to move on to the next driver if the current driver doesn't respond in a timely manner.
 
 **Solution: Durable Execution**
@@ -269,7 +259,7 @@ The entire process is fault-tolerant and can handle service failures, network is
 The main challenge with this approach is the additional complexity of introducing a workflow orchestration system. It requires teams to learn new concepts and tools, and adds another component to the system that needs to be monitored and maintained.
 However, the benefits of guaranteed execution, built-in fault tolerance, and simplified business logic often outweigh these challenges, especially for mission-critical systems like ride-sharing platforms where dropped requests directly impact revenue and user experience.
 
-#### 6. How can you further scale the system to reduce latency and improve throughput?
+### 6. How can you further scale the system to reduce latency and improve throughput?
 
 **Solution: Geo-sharding with Read-replicas** 
 
@@ -281,13 +271,13 @@ A better approach is to scale horizontally by adding more servers. We can do thi
 
 The main challenge with this approach is the complexity of sharding and managing multiple servers. We need to ensure that data is distributed evenly across shards and that the system can handle failures and rebalancing. We can address this by using consistent hashing to distribute data across shards and by implementing a replication strategy to ensure that data is replicated across multiple servers. This allows us to scale the system horizontally while maintaining fault tolerance and high availability.
 
-### Additional Features (optional)
+## Additional Features (optional)
 - Pooling/shared rides: needs route optimization and multi-stop matching.
 - Estimated Time of Arrival (ETA) improvements with ML.
 - Driver incentives & dynamic pricing models.
 - Real-time surge visualization dashboards.
 
-### Interview Tips
+## Interview Tips
 - Clarify requirements and constraints (scale, target markets).
 - Start with a simple core design (rider requests → nearest driver match), then iterate with scaling and failure scenarios.
 - Be explicit about data flows, bottlenecks, and where to add caches or queues.
