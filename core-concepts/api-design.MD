@@ -1,0 +1,13 @@
+# API Design
+
+In almost every system design interview, you'll need to sketch out the APIs that clients use to interact with your system. The good news is that most interviewers don't care about perfect API design. They want to see that you can create reasonable endpoints and move on to the harder architectural problems. That said, sloppy API design can signal inexperience, so it's worth knowing the basics.
+For 90% of interviews, you'll default to REST. It maps resources to URLs and uses HTTP methods to manipulate them. Think /users/{id} for getting a user, POST /events/{id}/bookings for creating a booking. REST is well-understood, works everywhere, and your interviewer will assume this unless you propose something else.
+
+GraphQL shows up in specific scenarios. If the problem mentions multiple client types with different data needs (mobile app vs web dashboard), or if the interviewer specifically talks about over-fetching and under-fetching, that's your cue to mention GraphQL. It lets clients request exactly the fields they need in a single query. But GraphQL adds real complexity on the backend. You need query parsing, schema validation, and you'll likely hit the N+1 query problem where one GraphQL query triggers dozens of database queries. Only reach for it when the flexibility is actually needed.
+
+gRPC comes up for internal service-to-service communication when performance is critical. It uses binary serialization instead of JSON, making it significantly faster. But you won't use it for public-facing APIs because browser support is limited. A common pattern is REST for your external APIs and gRPC for internal microservice communication.
+
+> A common mistake is spending too much time designing APIs in interviews. You should be able to sketch out 4-5 key endpoints in a couple minutes and move on. If you find yourself still designing API details 10 minutes into the interview, you're going too deep.
+There are a few concepts worth mentioning when they come up. If you're returning large result sets, you'll need pagination. 
+
+Cursor-based works better for real-time data where new items get added frequently, but offset-based is fine for most cases. For authentication, use JWT tokens for user sessions and API keys for service-to-service calls. And if your system could get hammered by bots or abuse, mention rate limiting. But don't go deep on any of these unless the interviewer specifically asks.
