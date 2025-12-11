@@ -1,0 +1,37 @@
+resources/.DS_Store
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Resource folder-specific
+resources/.DS_Store
+
+# Editor directories
+.vscode/
+.idea/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environment variables
+.env
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# Misc
+Thumbs.db
+
