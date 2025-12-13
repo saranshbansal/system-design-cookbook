@@ -2,7 +2,44 @@ https://www.hellointerview.com/learn/system-design/problem-breakdowns/top-k
 
 # 🎬 Top K Video Finder System Design
 
+## Understanding the Problem
+
 The "Top K Video Finder" is a common system design problem, often framed as finding the top $K$ most viewed or trending videos in a given time window (e.g., last hour, last day). We'll approach this by detailing solutions for beginner, intermediate, and expert levels.
+
+## Requirements
+Requirements clarifications are important for all system design problems, but in top-K questions in particular small changes to the requirements can have dramatic impacts on the design. We need to nail down the contract we have with our clients: what do they expect our system to be able to do?
+
+There's two primary types of windows that are used in streaming systems: **sliding windows and tumbling windows**.
+
+![Top K Video Finder window types](../resources/img/top-k-windows.png)
+
+- With sliding windows, the last 1 hour is the time between [T-1 hour] and [T]. If our current time is 10:06, the last 1 hour is the time between 9:06 and 10:06.
+- With tumbling windows the window for the last hour is the last full hour that starts and ends on an hour boundary. So the time between [Floor(T - 1 hour, 'hour')] and [Floor(T, 'hour')]. If our current time is 10:06, the last 1 hour is the time between 9:00 and 10:00.
+
+### Functional Requirements
+
+- Clients should be able to query the top K videos for all-time (up to a max of 1k results).
+- Clients should be able to query tumbling windows of 1 {hour, day, month} and all-time (up to a max of 1k results).
+
+##### Out of scope
+
+- Arbitrary time periods.
+- Arbitrary starting/ending points (we'll assume all queries are looking back from the current moment).
+
+### Non-Functional Requirements
+
+- We'll tolerate at most 1 min delay between when a view occurs and when it should be tabulated.
+- Our results must be precise, so we should not approximate.
+- We should return results within 10's of milliseconds.
+- Our system should be able to handle a massive number of views per second.
+- We should support a massive number of videos.
+
+![Top K Video Finder requirements](../resources/img/top-k-requirements.png)
+
+## API or System Design
+
+`GET /views/top-k?window={WINDOW}&k={K} -> { videoId: string, views: number }[]`
+
 
 ## 🟢 Level 1: Beginner (Single Server, Basic Aggregation)
 This design is suitable for a low-volume system where data fits in memory and the focus is on a single, overall time window (e.g., all-time top 100).
