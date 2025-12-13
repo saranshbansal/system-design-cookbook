@@ -1,11 +1,6 @@
-resources/.DS_Store
-
 # macOS
 .DS_Store
 **/.DS_Store
-
-# Resource folder-specific
-resources/.DS_Store
 
 # Editor directories
 .vscode/
