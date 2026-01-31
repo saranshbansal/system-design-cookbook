@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="400" viewBox="0 0 1000 400">
+  <rect width="100%" height="100%" fill="#ffffff" />
+  <text x="40" y="60" font-family="sans-serif" font-size="22" fill="#0f172a">Twitter Feed — Sequence (post → fanout → read)</text>
+  <g font-family="sans-serif" font-size="13" fill="#0f172a">
+    <rect x="60" y="110" width="140" height="60" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="80" y="142">Client</text>
+
+    <rect x="260" y="110" width="140" height="60" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="280" y="142">Write Service</text>
+
+    <rect x="460" y="110" width="140" height="60" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="480" y="142">Kafka (tweets)</text>
+
+    <rect x="660" y="110" width="140" height="60" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="690" y="142">Fanout Worker</text>
+
+    <line x1="200" y1="130" x2="260" y2="130" stroke="#0f172a" stroke-width="1.5" marker-end="url(#arrow)" />
+    <line x1="400" y1="130" x2="460" y2="130" stroke="#0f172a" stroke-width="1.5" marker-end="url(#arrow)" />
+    <line x1="600" y1="130" x2="660" y2="130" stroke="#0f172a" stroke-width="1.5" marker-end="url(#arrow)" />
+  </g>
+</svg>

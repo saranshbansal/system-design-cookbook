@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="400" viewBox="0 0 1000 400">
+  <rect width="100%" height="100%" fill="#ffffff" />
+  <rect x="20" y="20" width="960" height="360" rx="8" fill="#0ea5a4" opacity="0.08" />
+  <text x="40" y="70" font-family="sans-serif" font-size="22" fill="#0f172a">Twitter Feed — Component Diagram</text>
+  <g font-family="sans-serif" font-size="14" fill="#0f172a">
+    <rect x="60" y="110" width="180" height="90" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="75" y="140">API Gateway</text>
+
+    <rect x="280" y="110" width="180" height="90" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="300" y="140">Timeline Service</text>
+
+    <rect x="500" y="110" width="180" height="90" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="520" y="140">Fanout Workers</text>
+
+    <rect x="720" y="110" width="160" height="90" rx="6" fill="#fff" stroke="#94a3b8" />
+    <text x="740" y="140">Ranker / ML</text>
+
+    <text x="110" y="220" font-size="13">→ Redis Cache</text>
+    <text x="330" y="220" font-size="13">→ Cassandra (timelines)</text>
+    <text x="550" y="220" font-size="13">→ Kafka (events)</text>
+  </g>
+</svg>
